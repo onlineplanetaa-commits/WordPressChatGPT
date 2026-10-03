@@ -1,0 +1,61 @@
+name: WordPress draft from ChatGPT
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  wordpress:
+    if: startsWith(github.event.issue.title, '[WP]')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Create WordPress draft
+        env:
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, urllib.request
+
+          title = os.environ["ISSUE_TITLE"][4:].strip()
+          content = os.environ.get("ISSUE_BODY") or ""
+
+          data = json.dumps({
+              "title": title,
+              "content": content,
+              "status": "draft"
+          }).encode("utf-8")
+
+          auth = base64.b64encode(
+              f'{os.environ["WP_USER"]}:{os.environ["WP_APP_PASSWORD"]}'.encode()
+          ).decode()
+
+          req = urllib.request.Request(
+              os.environ["WP_URL"].rstrip("/") + "/wp-json/wp/v2/posts",
+              data=data,
+              headers={
+                  "Authorization": "Basic " + auth,
+                  "Content-Type": "application/json"
+              },
+              method="POST"
+          )
+
+          with urllib.request.urlopen(req) as response:
+              result = json.load(response)
+
+          print("WordPress draft created:", result.get("id"))
+          print("WordPress link:", result.get("link"))
+          PY
+
+      - name: Close processed issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh issue close "$ISSUE_NUMBER" --reason completed
