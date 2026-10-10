@@ -69,7 +69,9 @@ jobs:
               })
               api = "https://commons.wikimedia.org/w/api.php?" + params
               try:
-                  result = request_json(api, extra_headers={"User-Agent": "WorldGoneMadBot/1.0 (WordPress article publisher)"})
+                  commons_req = urllib.request.Request(api, headers={"User-Agent": "WorldGoneMadBot/1.0 (WordPress article publisher)"})
+                  with urllib.request.urlopen(commons_req, timeout=45) as commons_response:
+                      result = json.load(commons_response)
                   pages = (result.get("query") or {}).get("pages") or {}
                   for page in pages.values():
                       info = (page.get("imageinfo") or [{}])[0]
