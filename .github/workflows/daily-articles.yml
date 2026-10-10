@@ -92,11 +92,27 @@ jobs:
                   "Apocalypse & Doomsday": "climate risk asteroid supervolcano existential threat latest",
               }
               query = query_by_category.get(target_name, target_name + " latest news")
-              rss_url = "https://www.bing.com/news/search?" + urllib.parse.urlencode({"q": query, "format": "rss", "setlang": "en-US"})
-              request = urllib.request.Request(rss_url, headers={"User-Agent": "MadWorldDailyDrafts/1.0"})
-              with urllib.request.urlopen(request, timeout=35) as response:
-                  xml_data = response.read()
-              root = ET.fromstring(xml_data)
+              rss_urls = [
+                  "https://www.bing.com/news/search?" + urllib.parse.urlencode({"q": query, "format": "rss", "setlang": "en-US"}),
+                  "https://news.google.com/rss/search?" + urllib.parse.urlencode({"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}),
+              ]
+              root = None
+              for rss_url in rss_urls:
+                  try:
+                      request = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0 (compatible; MadWorldDailyDrafts/1.0)"})
+                      with urllib.request.urlopen(request, timeout=35) as response:
+                          xml_data = response.read()
+                      parsed = ET.fromstring(xml_data)
+                      if parsed.findall(".//item"):
+                          root = parsed
+                          print("News RSS provider succeeded:", urllib.parse.urlparse(rss_url).netloc)
+                          break
+                      print("RSS provider returned no items:", urllib.parse.urlparse(rss_url).netloc)
+                  except Exception as exc:
+                      print("RSS provider failed:", urllib.parse.urlparse(rss_url).netloc, str(exc)[:180])
+              if root is None:
+                  print("No valid RSS feed for category:", target_name)
+                  return []
               candidates = []
               for item in root.findall(".//item")[:12]:
                   title = (item.findtext("title") or "").strip()
@@ -162,12 +178,32 @@ jobs:
                   "generation_config": {"temperature": 0.6, "max_output_tokens": 7000},
                   "store": False
               }
-              result = request_json(
-                  "https://generativelanguage.googleapis.com/v1beta/interactions",
-                  data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                  headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
-                  method="POST", timeout=240
-              )
+              result = None
+              request_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+              for attempt in range(1, 4):
+                  try:
+                      result = request_json(
+                          "https://generativelanguage.googleapis.com/v1beta/interactions",
+                          data=request_body,
+                          headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+                          method="POST", timeout=300
+                      )
+                      break
+                  except urllib.error.HTTPError as exc:
+                      detail = exc.read().decode("utf-8", "replace")[:500]
+                      if exc.code not in (429, 500, 502, 503, 504) or attempt == 3:
+                          raise
+                      delay = 12 * attempt
+                      print(f"Gemini temporary HTTP {exc.code}; retry {attempt}/3 after {delay}s:", detail)
+                      time.sleep(delay)
+                  except (TimeoutError, urllib.error.URLError) as exc:
+                      if attempt == 3:
+                          raise
+                      delay = 12 * attempt
+                      print(f"Gemini connection timeout/error; retry {attempt}/3 after {delay}s:", str(exc)[:300])
+                      time.sleep(delay)
+              if result is None:
+                  raise RuntimeError("Gemini did not return a response after retries.")
               output_parts = []
               grounded_urls = []
               for step in result.get("steps") or []:
