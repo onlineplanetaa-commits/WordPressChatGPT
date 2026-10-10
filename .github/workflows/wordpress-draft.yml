@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Install image conversion dependency
-        run: python3 -m pip install --user Pillow
+        run: python3 -m pip install --user Pillow yt-dlp
 
       - name: Create WordPress draft with WebP featured image
         env:
@@ -45,6 +45,85 @@ jobs:
               req = urllib.request.Request(url, data=data, headers=h, method=method)
               with urllib.request.urlopen(req, timeout=45) as response:
                   return json.load(response)
+
+          # Search the site's public archive for a genuinely related older article.
+          stopwords = set("about after again against all also among and are article been before being between but can could from have into its more most new not our over said same some such than that the their them then there these they this those through under until very was were what when where which while who will with would".split())
+          def terms(text):
+              return {w for w in re.findall(r"[a-z0-9]{4,}", re.sub(r"<[^>]+>", " ", text.lower())) if w not in stopwords}
+          title_terms = terms(title)
+          related = None
+          if title_terms:
+              try:
+                  search_url = wp_url + "/wp-json/wp/v2/posts?" + urllib.parse.urlencode({
+                      "search": " ".join(sorted(title_terms)[:6]), "per_page": 10, "status": "publish"
+                  })
+                  matches = request_json(search_url, extra_headers={"Authorization": ""})
+                  best_score = 0
+                  for item in matches:
+                      item_title = (item.get("title") or {}).get("rendered", "")
+                      overlap = len(title_terms & terms(item_title))
+                      if item.get("link") and item.get("link") != wp_url and overlap > best_score:
+                          best_score, related = overlap, item
+                  if best_score < 2:
+                      related = None
+              except Exception as e:
+                  print("Related-article lookup failed; continuing without an internal link:", str(e))
+                  related = None
+
+          # Look for a YouTube video; add it only when its title has a clear
+          # keyword overlap with the article title and the oEmbed endpoint confirms it.
+          video = None
+          try:
+              import subprocess
+              query = " ".join(sorted(title_terms)[:7]) or title
+              search = subprocess.run(
+                  ["yt-dlp", "--flat-playlist", "--dump-single-json", "ytsearch5:" + query],
+                  capture_output=True, text=True, timeout=75
+              )
+              if search.returncode == 0 and search.stdout.strip():
+                  data = json.loads(search.stdout)
+                  entries = data.get("entries") or []
+                  best_score = 0
+                  for entry in entries:
+                      vid_title = entry.get("title") or ""
+                      vid_id = entry.get("id") or ""
+                      overlap = len(title_terms & terms(vid_title))
+                      if not vid_id or overlap < 2 or overlap <= best_score:
+                          continue
+                      video_url = "https://www.youtube.com/watch?v=" + vid_id
+                      try:
+                          oembed = "https://www.youtube.com/oembed?" + urllib.parse.urlencode({"url": video_url, "format": "json"})
+                          video_meta = request_json(oembed, extra_headers={"Authorization": ""})
+                          video = {"url": video_url, "title": video_meta.get("title") or vid_title}
+                          best_score = overlap
+                      except Exception:
+                          continue
+          except Exception as e:
+              print("YouTube video search failed; continuing without video:", str(e))
+              video = None
+
+          # Put a verified video before the source block when one exists.
+          if video:
+              embed = '<figure class="wp-block-embed is-type-video is-provider-youtube wp-block-embed-youtube"><div class="wp-block-embed__wrapper">\\n' + video["url"] + '\\n</div></figure>'
+              source_heading = re.search(r"<h[2-6][^>]*>\\s*(source of information|sources|references)\\s*</h[2-6]>", content, re.I)
+              if source_heading:
+                  content = content[:source_heading.start()] + embed + "\\n" + content[source_heading.start():]
+              else:
+                  content += "\\n" + embed
+              print("Related YouTube video selected:", video["title"], video["url"])
+          else:
+              print("No sufficiently relevant, verifiable YouTube video found; no video added.")
+
+          if related:
+              old_title = (related.get("title") or {}).get("rendered", "related article")
+              related_html = (
+                  '<p><strong>We previously reported on a related development:</strong> '
+                  '<a href="' + related["link"] + '">' + old_title + '</a>.</p>'
+              )
+              content += "\\n" + related_html
+              print("Related site article added:", old_title, related["link"])
+          else:
+              print("No sufficiently related published article found on this site; no internal link added.")
 
           # Find a reusable image on Wikimedia Commons and only accept freely
           # reusable licenses; convert it locally to WebP before uploading.
