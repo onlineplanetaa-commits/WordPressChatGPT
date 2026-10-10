@@ -1,0 +1,334 @@
+name: Daily MadWorld article drafts
+
+on:
+  schedule:
+    # Daily at 08:00 UTC (11:00 in Ukraine during summer time).
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: madworld-daily-drafts
+  cancel-in-progress: false
+
+jobs:
+  create-drafts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Generate researched articles and create WordPress drafts
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          WP_URL: ${{ secrets.WP_URL }}
+          WP_USER: ${{ secrets.WP_USER }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import os, json, base64, urllib.request, urllib.parse, urllib.error, io, re, sys, html, time
+          from datetime import datetime, timezone
+          from PIL import Image
+
+          OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+          WP_URL = os.environ["WP_URL"].rstrip("/")
+          WP_USER = os.environ["WP_USER"]
+          WP_PASSWORD = os.environ["WP_APP_PASSWORD"]
+          if not OPENAI_API_KEY:
+              raise SystemExit("Missing OPENAI_API_KEY GitHub Actions secret.")
+
+          AUTH = "Basic " + base64.b64encode(f"{WP_USER}:{WP_PASSWORD}".encode()).decode()
+          WP_HEADERS = {"Authorization": AUTH, "User-Agent": "MadWorldDailyDrafts/1.0"}
+          CATEGORIES = [
+              ("paranormal", "Paranormal"),
+              ("catastrophes", "Catastrophes"),
+              ("secrets-of-history", "Secrets of History"),
+              ("ufo-aliens", "UFO & Aliens"),
+              ("wars-conflicts", "Wars & Conflicts"),
+              ("apocalypse-doomsday", "Apocalypse & Doomsday"),
+          ]
+          EXTRA_TOPICS = "strange events, bizarre true stories, unusual discoveries, curious incidents, unusual crimes, robberies, odd court cases, and extraordinary human behavior"
+          TODAY = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+          def request_json(url, data=None, headers=None, method=None, timeout=60):
+              h = {"User-Agent": "MadWorldDailyDrafts/1.0"}
+              if headers:
+                  h.update(headers)
+              req = urllib.request.Request(url, data=data, headers=h, method=method)
+              with urllib.request.urlopen(req, timeout=timeout) as response:
+                  raw = response.read()
+              return json.loads(raw.decode("utf-8")) if raw else {}
+
+          def wp_json(path, params=None, data=None, method=None, headers=None):
+              url = WP_URL + path
+              if params:
+                  url += "?" + urllib.parse.urlencode(params)
+              h = dict(WP_HEADERS)
+              if headers:
+                  h.update(headers)
+              if data is not None:
+                  h["Content-Type"] = "application/json"
+                  data = json.dumps(data, ensure_ascii=False).encode("utf-8")
+              return request_json(url, data=data, headers=h, method=method, timeout=75)
+
+          def strip_html(value):
+              return html.unescape(re.sub(r"<[^>]+>", " ", value or "")).strip()
+
+          def terms(text):
+              stop = set("about after again all also among and are article been before being between but can could from have into its more most new not our over said same some such than that the their them then there these they this those through under until very was were what when where which while who will with would".split())
+              return {w for w in re.findall(r"[a-z0-9]{4,}", strip_html(text).lower()) if w not in stop}
+
+          def openai_article(target_name, recent_titles, used_story_titles):
+              category_names = [name for _, name in CATEGORIES]
+              prompt = f"""
+          Today is {TODAY}. You are the research editor for MadWorld.site, an English-language publication about strange events, mysteries, world news, unexplained phenomena, history, disasters, wars, and crime.
+          Research current, real stories using web search. Prefer stories published in the last 72 hours; for evergreen history or mysteries, choose a genuinely new discovery, newly released evidence, or a strong documented angle.
+          Preferred category for this article: {target_name}. If there is no genuinely worthwhile new story in that category, choose a better-supported story from another category. You may also choose {EXTRA_TOPICS}. Allowed WordPress category slugs are: paranormal, catastrophes, secrets-of-history, ufo-aliens, wars-conflicts, apocalypse-doomsday. Return the chosen slug and its matching category name.
+          Do not invent facts, dates, quotes, sources, links, witnesses, or video URLs. Distinguish verified facts from claims, speculation, and eyewitness accounts. For UFO/paranormal stories, do not present unverified claims as established fact. Avoid graphic detail and sensational claims unsupported by sources.
+          The article must be original reporting-style synthesis, not a sentence-by-sentence rewrite. Use a curious, engaging, mysterious tone without misleading clickbait. Natural, varied paragraph lengths; avoid generic AI filler, repetitive transitions, and templated openings. Use about 250–450 words. Prefer sentences under 20 words.
+          Never repeat or substantially repackage these existing post titles: {json.dumps(recent_titles[-100:], ensure_ascii=False)}.
+          Do not choose these already-selected stories in this run: {json.dumps(used_story_titles, ensure_ascii=False)}.
+          Return a JSON object with exactly these keys:
+          "title": specific intriguing English title (normally 70–130 characters; no unsupported certainty),
+          "category_slug": one allowed slug,
+          "excerpt": a concise 1–2 sentence excerpt,
+          "content_html": valid clean HTML article body,
+          "story_identity": short normalized description of the actual event/story,
+          "source_urls": array of 2–5 direct source URLs used for factual claims.
+          HTML rules: exactly one <h1> article headline at the start; exactly one <h2> heading around the middle; use paragraphs and <strong> sparingly for natural keyword emphasis; no bullet lists. End with a <h3>Source of information</h3> and a short list of linked sources from source_urls. Sources must be real and directly relevant. No Markdown fences. No image HTML. Do not include invented YouTube/X/Facebook embeds.
+          If no sufficiently credible, interesting story can be found after searching, return {"skip": true, "reason": "..."} instead of inventing one.
+          """
+              payload = {
+                  "model": "gpt-6-astra",
+                  "tools": [{"type": "web_search", "search_context_size": "medium"}],
+                  "input": prompt,
+                  "text": {"format": {"type": "json_object"}}
+              }
+              result = request_json(
+                  "https://api.openai.com/v1/responses",
+                  data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                  headers={"Authorization": "Bearer " + OPENAI_API_KEY, "Content-Type": "application/json"},
+                  method="POST", timeout=240
+              )
+              text_out = result.get("output_text")
+              if not text_out:
+                  pieces = []
+                  for item in result.get("output", []):
+                      if item.get("type") == "message":
+                          for part in item.get("content", []):
+                              if part.get("type") == "output_text":
+                                  pieces.append(part.get("text", ""))
+                  text_out = "\n".join(pieces)
+              if not text_out:
+                  raise RuntimeError("OpenAI response did not contain output text.")
+              return json.loads(text_out)
+
+          def image_search_and_upload(title):
+              clean = re.sub(r"[^A-Za-z0-9 ]", " ", title)
+              words = [w for w in clean.split() if len(w) > 3]
+              queries = [title]
+              if len(words) > 4:
+                  queries.append(" ".join(words[:5]))
+              chosen = None
+              for term in queries:
+                  params = urllib.parse.urlencode({
+                      "action": "query", "format": "json", "generator": "search",
+                      "gsrsearch": term, "gsrnamespace": 6, "gsrlimit": 12,
+                      "prop": "imageinfo", "iiprop": "url|mime|extmetadata", "iiurlwidth": 1600
+                  })
+                  try:
+                      result = request_json("https://commons.wikimedia.org/w/api.php?" + params,
+                          headers={"User-Agent": "MadWorldBot/1.0 (WordPress article publisher)"}, timeout=45)
+                      pages = (result.get("query") or {}).get("pages") or {}
+                      for page in pages.values():
+                          info = (page.get("imageinfo") or [{}])[0]
+                          mime = info.get("mime", "")
+                          meta = info.get("extmetadata") or {}
+                          license_name = strip_html((meta.get("LicenseShortName") or {}).get("value", ""))
+                          license_url = strip_html((meta.get("LicenseUrl") or {}).get("value", ""))
+                          artist = strip_html((meta.get("Artist") or {}).get("value", ""))[:400]
+                          source_url = info.get("descriptionurl", "")
+                          image_url = info.get("thumburl") or info.get("url")
+                          lname = license_name.lower()
+                          if not image_url or mime not in ("image/jpeg", "image/png", "image/webp"):
+                              continue
+                          if not any(x in lname for x in ("public domain", "cc0", "cc by")):
+                              continue
+                          if "noncommercial" in lname or " cc by-nc" in (" " + lname):
+                              continue
+                          chosen = {"url": image_url, "source": source_url, "license": license_name,
+                                    "license_url": license_url, "artist": artist}
+                          break
+                      if chosen:
+                          break
+                  except Exception as e:
+                      print("Image search failed for query:", term, str(e))
+              if not chosen:
+                  raise RuntimeError("No suitable freely licensed Wikimedia Commons image found; skipping this article rather than publishing without its required image.")
+              req = urllib.request.Request(chosen["url"], headers={"User-Agent": "MadWorldDailyDrafts/1.0"})
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  raw = response.read()
+              img = Image.open(io.BytesIO(raw)).convert("RGB")
+              img.thumbnail((1600, 1000), Image.Resampling.LANCZOS)
+              out = io.BytesIO()
+              img.save(out, format="WEBP", quality=84, method=6)
+              slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:65] or "madworld-image"
+              filename = slug + ".webp"
+              media = request_json(
+                  WP_URL + "/wp-json/wp/v2/media",
+                  data=out.getvalue(),
+                  headers={**WP_HEADERS, "Content-Type": "image/webp", "Content-Disposition": f'attachment; filename="{filename}"'},
+                  method="POST", timeout=90
+              )
+              attribution = ("Image source: Wikimedia Commons. " + (chosen["artist"] or "Contributor not specified") +
+                             ". License: " + chosen["license"] + ". Source: " + chosen["source"] +
+                             (". License details: " + chosen["license_url"] if chosen["license_url"] else ""))
+              wp_json("/wp-json/wp/v2/media/" + str(media["id"]), data={
+                  "alt_text": title[:250], "caption": attribution, "description": attribution
+              }, method="POST")
+              return media["id"], chosen
+
+          def find_related_link(title, published_posts):
+              wanted = terms(title)
+              best, score = None, 0
+              for p in published_posts:
+                  t = strip_html((p.get("title") or {}).get("rendered", ""))
+                  overlap = len(wanted & terms(t))
+                  if p.get("link") and overlap > score:
+                      best, score = p, overlap
+              return best if score >= 2 else None
+
+          def get_youtube_video(title):
+              try:
+                  import subprocess
+                  title_terms = terms(title)
+                  query = " ".join(re.findall(r"[A-Za-z0-9]{3,}", title)[:7]) or title
+                  proc = subprocess.run(["yt-dlp", "--flat-playlist", "--dump-single-json", "ytsearch5:" + query],
+                                        capture_output=True, text=True, timeout=60)
+                  if proc.returncode != 0 or not proc.stdout.strip():
+                      return None
+                  data = json.loads(proc.stdout)
+                  best = None
+                  for entry in data.get("entries") or []:
+                      vid = entry.get("id") or ""
+                      vtitle = entry.get("title") or ""
+                      overlap = len(title_terms & terms(vtitle))
+                      if not vid or overlap < 2 or (best and overlap <= best[0]):
+                          continue
+                      url = "https://www.youtube.com/watch?v=" + vid
+                      try:
+                          meta = request_json("https://www.youtube.com/oembed?" + urllib.parse.urlencode({"url": url, "format": "json"}),
+                                              headers={"User-Agent": "MadWorldDailyDrafts/1.0"}, timeout=20)
+                          best = (overlap, url, meta.get("title") or vtitle)
+                      except Exception:
+                          continue
+                  return {"url": best[1], "title": best[2]} if best else None
+              except Exception as e:
+                  print("Video search skipped:", str(e))
+                  return None
+
+          # Resolve category IDs from the actual WordPress installation.
+          wp_categories = {}
+          for slug, name in CATEGORIES:
+              found = wp_json("/wp-json/wp/v2/categories", {"slug": slug, "per_page": 10})
+              if found:
+                  wp_categories[slug] = found[0]["id"]
+              else:
+                  print("WARNING: category slug not found on site:", slug, name)
+
+          if not wp_categories:
+              raise SystemExit("Could not resolve any of the configured WordPress categories.")
+
+          recent_titles = []
+          published_posts = []
+          for status in ("publish", "draft", "pending", "future"):
+              try:
+                  posts = wp_json("/wp-json/wp/v2/posts", {"status": status, "per_page": 100, "orderby": "date", "order": "desc"})
+                  for post in posts:
+                      recent_titles.append(strip_html((post.get("title") or {}).get("rendered", "")))
+                      if status == "publish":
+                          published_posts.append(post)
+              except Exception as e:
+                  print("Could not retrieve WordPress", status, "posts:", str(e))
+
+          used_story_titles = []
+          created = 0
+          target_count = 6
+          # One intended slot per category; if a slot has no suitable story, ask the model to find a better-supported category.
+          for index, (target_slug, target_name) in enumerate(CATEGORIES, start=1):
+              print(f"\n[{index}/{target_count}] Researching target category: {target_name}")
+              try:
+                  article = openai_article(target_name, recent_titles, used_story_titles)
+                  if article.get("skip"):
+                      print("No suitable story found; skipping slot:", article.get("reason", "no reason supplied"))
+                      continue
+                  title = (article.get("title") or "").strip()
+                  content = (article.get("content_html") or "").strip()
+                  chosen_slug = (article.get("category_slug") or target_slug).strip()
+                  story_identity = (article.get("story_identity") or title).strip()
+                  if not title or not content:
+                      print("Skipping malformed model result with missing title/content.")
+                      continue
+                  if chosen_slug not in wp_categories:
+                      print("Chosen category missing on WordPress; using target category:", target_slug)
+                      chosen_slug = target_slug
+                  duplicate_terms = terms(title)
+                  duplicate = False
+                  for old in recent_titles:
+                      old_terms = terms(old)
+                      if duplicate_terms and old_terms and len(duplicate_terms & old_terms) / max(1, len(duplicate_terms)) >= 0.75:
+                          duplicate = True
+                          break
+                  if duplicate or any(story_identity.lower() == s.lower() for s in used_story_titles):
+                      print("Skipping probable duplicate story/title:", title)
+                      continue
+                  source_urls = article.get("source_urls") or []
+                  valid_sources = [u for u in source_urls if isinstance(u, str) and u.startswith("https://")]
+                  if len(valid_sources) < 2:
+                      print("Skipping article without at least two direct HTTPS sources:", title)
+                      continue
+                  # Ensure the source block includes only URLs returned by the research step and retain citations in the article.
+                  image_id, image_info = image_search_and_upload(title)
+                  related = find_related_link(title, published_posts)
+                  if related:
+                      rel_title = strip_html((related.get("title") or {}).get("rendered", "Related article"))
+                      content += '\n<p>We previously reported on a related development: <a href="' + html.escape(related["link"], quote=True) + '">' + html.escape(rel_title) + '</a>.</p>'
+                      print("Internal link added:", related["link"])
+                  video = get_youtube_video(title)
+                  if video:
+                      embed = '<figure class="wp-block-embed is-type-video is-provider-youtube wp-block-embed-youtube"><div class="wp-block-embed__wrapper">\n' + video["url"] + '\n</div></figure>'
+                      m = re.search(r"<h3[^>]*>\s*Source of information\s*</h3>", content, re.I)
+                      if m:
+                          content = content[:m.start()] + embed + '\n' + content[m.start():]
+                      else:
+                          content += '\n' + embed
+                      print("Relevant YouTube video added:", video["title"], video["url"])
+                  else:
+                      print("No sufficiently relevant YouTube video found.")
+                  # Add category and a short excerpt. Always create a draft, never publish.
+                  post = wp_json("/wp-json/wp/v2/posts", data={
+                      "title": title,
+                      "content": content,
+                      "excerpt": article.get("excerpt", ""),
+                      "status": "draft",
+                      "categories": [wp_categories[chosen_slug]],
+                      "featured_media": image_id
+                  }, method="POST")
+                  created += 1
+                  recent_titles.append(title)
+                  used_story_titles.append(story_identity)
+                  print("DRAFT CREATED:", post.get("id"), title)
+                  print("CATEGORY:", chosen_slug, "FEATURED WEBP MEDIA:", image_id)
+                  print("POST LINK:", post.get("link"))
+                  print("ARTICLE SOURCE URLS:", json.dumps(valid_sources))
+              except urllib.error.HTTPError as e:
+                  detail = e.read().decode("utf-8", "replace")[:1200]
+                  print(f"Slot {index} failed with HTTP {e.code}: {detail}")
+              except Exception as e:
+                  print(f"Slot {index} failed:", repr(e))
+              time.sleep(2)
+
+          print(f"\nDaily run complete. WordPress drafts created: {created}/{target_count}.")
+          if created == 0:
+              raise SystemExit("No drafts were created. Check the logs above.")
+          PY
