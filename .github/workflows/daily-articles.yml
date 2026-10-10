@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Install image and video search dependencies
+        run: python3 -m pip install --upgrade Pillow yt-dlp
       - name: Generate researched articles and create WordPress drafts
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
