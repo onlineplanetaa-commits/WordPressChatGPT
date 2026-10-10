@@ -104,12 +104,12 @@ jobs:
 
           # Put a verified video before the source block when one exists.
           if video:
-              embed = '<figure class="wp-block-embed is-type-video is-provider-youtube wp-block-embed-youtube"><div class="wp-block-embed__wrapper">\\n' + video["url"] + '\\n</div></figure>'
+              embed = '<figure class="wp-block-embed is-type-video is-provider-youtube wp-block-embed-youtube"><div class="wp-block-embed__wrapper">\n' + video["url"] + '\n</div></figure>'
               source_heading = re.search(r"<h[2-6][^>]*>\\s*(source of information|sources|references)\\s*</h[2-6]>", content, re.I)
               if source_heading:
-                  content = content[:source_heading.start()] + embed + "\\n" + content[source_heading.start():]
+                  content = content[:source_heading.start()] + embed + "\n" + content[source_heading.start():]
               else:
-                  content += "\\n" + embed
+                  content += "\n" + embed
               print("Related YouTube video selected:", video["title"], video["url"])
           else:
               print("No sufficiently relevant, verifiable YouTube video found; no video added.")
@@ -120,7 +120,7 @@ jobs:
                   '<p><strong>We previously reported on a related development:</strong> '
                   '<a href="' + related["link"] + '">' + old_title + '</a>.</p>'
               )
-              content += "\\n" + related_html
+              content += "\n" + related_html
               print("Related site article added:", old_title, related["link"])
           else:
               print("No sufficiently related published article found on this site; no internal link added.")
