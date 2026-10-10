@@ -2,7 +2,7 @@ name: WordPress draft from ChatGPT
 
 on:
   issues:
-    types: [opened]
+    types: [opened, edited]
 
 jobs:
   wordpress:
@@ -54,6 +54,7 @@ jobs:
           PY
 
       - name: Close processed issue
+        if: github.event.action == 'opened'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
