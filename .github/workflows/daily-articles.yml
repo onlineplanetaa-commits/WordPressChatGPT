@@ -136,11 +136,34 @@ jobs:
                       soup = BeautifulSoup(raw, "html.parser")
                       meta = soup.find("meta", attrs={"property": "og:description"}) or soup.find("meta", attrs={"name": "description"})
                       page_description = (meta.get("content", "").strip() if meta else "")
+                      # Read structured article text before removing scripts from the page.
+                      structured_excerpt = ""
+                      try:
+                          for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+                              data = json.loads(script.string or script.get_text() or "{}")
+                              stack = data if isinstance(data, list) else [data]
+                              while stack:
+                                  node = stack.pop()
+                                  if isinstance(node, dict):
+                                      candidate = node.get("articleBody")
+                                      if isinstance(candidate, str) and len(candidate) > len(structured_excerpt):
+                                          structured_excerpt = re.sub(r"\\s+", " ", candidate).strip()
+                                      graph = node.get("@graph")
+                                      if isinstance(graph, list):
+                                          stack.extend(graph)
+                                  elif isinstance(node, list):
+                                      stack.extend(node)
+                      except Exception:
+                          pass
                       body = soup.find("article") or soup.find("main") or soup.body or soup
                       for tag in body(["script", "style", "nav", "footer", "header", "noscript"]):
                           tag.decompose()
-                      paragraphs = [re.sub(r"\s+", " ", p.get_text(" ", strip=True)) for p in body.find_all("p")]
-                      excerpt = " ".join(p for p in paragraphs if len(p) > 45)[:1800]
+                      paragraphs = [re.sub(r"\\s+", " ", p.get_text(" ", strip=True)) for p in body.find_all("p")]
+                      excerpt = " ".join(p for p in paragraphs if len(p) > 45)[:2200]
+                      if len(structured_excerpt) > len(excerpt):
+                          excerpt = structured_excerpt[:2200]
+                      if not excerpt:
+                          excerpt = page_description or item["description"]
                       sources.append({
                           "title": item["title"], "url": final_url, "published": item["published"],
                           "search_snippet": item["description"][:700],
