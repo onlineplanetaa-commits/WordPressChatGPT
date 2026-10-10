@@ -25,7 +25,7 @@ jobs:
         run: python3 -m pip install --upgrade Pillow yt-dlp
       - name: Generate researched articles and create WordPress drafts
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           WP_URL: ${{ secrets.WP_URL }}
           WP_USER: ${{ secrets.WP_USER }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
@@ -35,12 +35,12 @@ jobs:
           from datetime import datetime, timezone
           from PIL import Image
 
-          OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+          GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
           WP_URL = os.environ["WP_URL"].rstrip("/")
           WP_USER = os.environ["WP_USER"]
           WP_PASSWORD = os.environ["WP_APP_PASSWORD"]
-          if not OPENAI_API_KEY:
-              raise SystemExit("Missing OPENAI_API_KEY GitHub Actions secret.")
+          if not GEMINI_API_KEY:
+              raise SystemExit("Missing GEMINI_API_KEY GitHub Actions secret.")
 
           AUTH = "Basic " + base64.b64encode(f"{WP_USER}:{WP_PASSWORD}".encode()).decode()
           WP_HEADERS = {"Authorization": AUTH, "User-Agent": "MadWorldDailyDrafts/1.0"}
@@ -83,49 +83,70 @@ jobs:
               stop = set("about after again all also among and are article been before being between but can could from have into its more most new not our over said same some such than that the their them then there these they this those through under until very was were what when where which while who will with would".split())
               return {w for w in re.findall(r"[a-z0-9]{4,}", strip_html(text).lower()) if w not in stop}
 
-          def openai_article(target_name, recent_titles, used_story_titles):
-              category_names = [name for _, name in CATEGORIES]
+          def gemini_article(target_name, recent_titles, used_story_titles):
               prompt = f"""
           Today is {TODAY}. You are the research editor for MadWorld.site, an English-language publication about strange events, mysteries, world news, unexplained phenomena, history, disasters, wars, and crime.
-          Research current, real stories using web search. Prefer stories published in the last 72 hours; for evergreen history or mysteries, choose a genuinely new discovery, newly released evidence, or a strong documented angle.
+          Research current, real stories using Google Search. Prefer stories published in the last 72 hours; for evergreen history or mysteries, choose a genuinely new discovery, newly released evidence, or a strong documented angle.
           Preferred category for this article: {target_name}. If there is no genuinely worthwhile new story in that category, choose a better-supported story from another category. You may also choose {EXTRA_TOPICS}. Allowed WordPress category slugs are: paranormal, catastrophes, secrets-of-history, ufo-aliens, wars-conflicts, apocalypse-doomsday. Return the chosen slug and its matching category name.
-          Do not invent facts, dates, quotes, sources, links, witnesses, or video URLs. Distinguish verified facts from claims, speculation, and eyewitness accounts. For UFO/paranormal stories, do not present unverified claims as established fact. Avoid graphic detail and sensational claims unsupported by sources.
+          Do not invent facts, dates, quotes, sources, links, witnesses, or video URLs. Use the actual URLs found during Google Search, not guessed URLs. Distinguish verified facts from claims, speculation, and eyewitness accounts. For UFO/paranormal stories, do not present unverified claims as established fact. Avoid graphic detail and unsupported sensational claims.
           The article must be original reporting-style synthesis, not a sentence-by-sentence rewrite. Use a curious, engaging, mysterious tone without misleading clickbait. Natural, varied paragraph lengths; avoid generic AI filler, repetitive transitions, and templated openings. Use about 250–450 words. Prefer sentences under 20 words.
           Never repeat or substantially repackage these existing post titles: {json.dumps(recent_titles[-100:], ensure_ascii=False)}.
           Do not choose these already-selected stories in this run: {json.dumps(used_story_titles, ensure_ascii=False)}.
-          Return a JSON object with exactly these keys:
+          Return one JSON object with exactly these keys:
           "title": specific intriguing English title (normally 70–130 characters; no unsupported certainty),
           "category_slug": one allowed slug,
           "excerpt": a concise 1–2 sentence excerpt,
           "content_html": valid clean HTML article body,
           "story_identity": short normalized description of the actual event/story,
-          "source_urls": array of 2–5 direct source URLs used for factual claims.
-          HTML rules: exactly one <h1> article headline at the start; exactly one <h2> heading around the middle; use paragraphs and <strong> sparingly for natural keyword emphasis; no bullet lists. End with a <h3>Source of information</h3> and a short list of linked sources from source_urls. Sources must be real and directly relevant. No Markdown fences. No image HTML. Do not include invented YouTube/X/Facebook embeds.
-          If no sufficiently credible, interesting story can be found after searching, return {{"skip": true, "reason": "..."}} instead of inventing one.
+          "source_urls": array of 2–5 direct source URLs actually found in Google Search.
+          HTML rules: exactly one <h1> article headline at the start; exactly one <h2> heading around the middle; use paragraphs and <strong> sparingly for natural keyword emphasis; no bullet lists in the body. End with a <h3>Source of information</h3> and a short list of linked sources from source_urls. Sources must be real and directly relevant. No Markdown fences. No image HTML. Do not include invented YouTube/X/Facebook embeds.
+          If no sufficiently credible, interesting story can be found after searching, return {"skip": true, "reason": "..."} instead of inventing one.
           """
               payload = {
-                  "model": "gpt-6-astra",
-                  "tools": [{"type": "web_search", "search_context_size": "medium"}],
-                  "input": prompt,
+                  "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                  "tools": [{"google_search": {}}],
+                  "generationConfig": {"temperature": 0.6, "maxOutputTokens": 7000}
               }
               result = request_json(
-                  "https://api.openai.com/v1/responses",
+                  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + urllib.parse.quote(GEMINI_API_KEY),
                   data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                  headers={"Authorization": "Bearer " + OPENAI_API_KEY, "Content-Type": "application/json"},
+                  headers={"Content-Type": "application/json"},
                   method="POST", timeout=240
               )
-              text_out = result.get("output_text")
+              candidates = result.get("candidates") or []
+              if not candidates:
+                  raise RuntimeError("Gemini returned no candidates: " + json.dumps(result.get("promptFeedback", {}), ensure_ascii=False)[:800])
+              parts = (candidates[0].get("content") or {}).get("parts") or []
+              text_out = "\n".join(part.get("text", "") for part in parts if part.get("text"))
               if not text_out:
-                  pieces = []
-                  for item in result.get("output", []):
-                      if item.get("type") == "message":
-                          for part in item.get("content", []):
-                              if part.get("type") == "output_text":
-                                  pieces.append(part.get("text", ""))
-                  text_out = "\n".join(pieces)
-              if not text_out:
-                  raise RuntimeError("OpenAI response did not contain output text.")
-              return json.loads(text_out)
+                  raise RuntimeError("Gemini response did not contain text.")
+              cleaned = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text_out, flags=re.I)
+              try:
+                  article = json.loads(cleaned)
+              except json.JSONDecodeError:
+                  match = re.search(r"\{.*\}", cleaned, re.S)
+                  if not match:
+                      raise RuntimeError("Gemini response was not valid JSON: " + cleaned[:500])
+                  article = json.loads(match.group(0))
+              # Prefer URLs supplied by Gemini's actual Google Search grounding metadata.
+              grounded_urls = []
+              metadata = candidates[0].get("groundingMetadata") or {}
+              for chunk in metadata.get("groundingChunks") or []:
+                  web_info = chunk.get("web") or {}
+                  url = web_info.get("uri", "")
+                  if url.startswith("https://") and url not in grounded_urls:
+                      grounded_urls.append(url)
+              model_urls = article.get("source_urls") or []
+              combined = []
+              for url in model_urls + grounded_urls:
+                  if isinstance(url, str) and url.startswith("https://") and url not in combined:
+                      combined.append(url)
+              # Only cite source URLs verified in the grounding results when available.
+              if grounded_urls:
+                  article["source_urls"] = [url for url in combined if url in grounded_urls][:5]
+              else:
+                  article["source_urls"] = combined[:5]
+              return article
 
           def image_search_and_upload(title):
               clean = re.sub(r"[^A-Za-z0-9 ]", " ", title)
@@ -262,7 +283,7 @@ jobs:
           for index, (target_slug, target_name) in enumerate(CATEGORIES, start=1):
               print(f"\n[{index}/{target_count}] Researching target category: {target_name}")
               try:
-                  article = openai_article(target_name, recent_titles, used_story_titles)
+                  article = gemini_article(target_name, recent_titles, used_story_titles)
                   if article.get("skip"):
                       print("No suitable story found; skipping slot:", article.get("reason", "no reason supplied"))
                       continue
