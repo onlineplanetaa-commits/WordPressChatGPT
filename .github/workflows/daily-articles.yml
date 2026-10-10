@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Install image and video search dependencies
-        run: python3 -m pip install --upgrade Pillow yt-dlp
+        run: python3 -m pip install --upgrade Pillow yt-dlp beautifulsoup4
       - name: Generate researched articles and create WordPress drafts
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -28,9 +28,10 @@ jobs:
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
         run: |
           python3 - <<'PY'
-          import os, json, base64, urllib.request, urllib.parse, urllib.error, io, re, sys, html, time
+          import os, json, base64, urllib.request, urllib.parse, urllib.error, io, re, sys, html, time, xml.etree.ElementTree as ET
           from datetime import datetime, timezone
           from PIL import Image
+          from bs4 import BeautifulSoup
 
           GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
           WP_URL = os.environ["WP_URL"].rstrip("/")
@@ -80,12 +81,68 @@ jobs:
               stop = set("about after again all also among and are article been before being between but can could from have into its more most new not our over said same some such than that the their them then there these they this those through under until very was were what when where which while who will with would".split())
               return {w for w in re.findall(r"[a-z0-9]{4,}", strip_html(text).lower()) if w not in stop}
 
-          def gemini_article(target_name, recent_titles, used_story_titles):
+          def search_news(target_name):
+              # Use external news RSS instead of Gemini Google Search grounding.
+              query_by_category = {
+                  "Paranormal": "paranormal unexplained mystery new evidence",
+                  "Catastrophes": "natural disaster earthquake volcano flood latest",
+                  "Secrets of History": "archaeology historical discovery newly revealed documents",
+                  "UFO & Aliens": "UFO UAP aliens space discovery latest",
+                  "Wars & Conflicts": "war conflict latest international news",
+                  "Apocalypse & Doomsday": "climate risk asteroid supervolcano existential threat latest",
+              }
+              query = query_by_category.get(target_name, target_name + " latest news")
+              rss_url = "https://www.bing.com/news/search?" + urllib.parse.urlencode({"q": query, "format": "rss", "setlang": "en-US"})
+              request = urllib.request.Request(rss_url, headers={"User-Agent": "MadWorldDailyDrafts/1.0"})
+              with urllib.request.urlopen(request, timeout=35) as response:
+                  xml_data = response.read()
+              root = ET.fromstring(xml_data)
+              candidates = []
+              for item in root.findall(".//item")[:12]:
+                  title = (item.findtext("title") or "").strip()
+                  url = (item.findtext("link") or "").strip()
+                  description = strip_html(item.findtext("description") or "")
+                  pub_date = (item.findtext("pubDate") or "").strip()
+                  if title and url.startswith("http"):
+                      candidates.append({"title": title, "url": url, "description": description, "published": pub_date})
+              sources = []
+              seen = set()
+              for item in candidates:
+                  if len(sources) >= 8:
+                      break
+                  try:
+                      req = urllib.request.Request(item["url"], headers={"User-Agent": "Mozilla/5.0 (compatible; MadWorldDailyDrafts/1.0)"})
+                      with urllib.request.urlopen(req, timeout=18) as response:
+                          final_url = response.geturl()
+                          raw = response.read(1500000)
+                      if not final_url.startswith("https://") or final_url in seen:
+                          continue
+                      soup = BeautifulSoup(raw, "html.parser")
+                      meta = soup.find("meta", attrs={"property": "og:description"}) or soup.find("meta", attrs={"name": "description"})
+                      page_description = (meta.get("content", "").strip() if meta else "")
+                      body = soup.find("article") or soup.find("main") or soup.body or soup
+                      for tag in body(["script", "style", "nav", "footer", "header", "noscript"]):
+                          tag.decompose()
+                      paragraphs = [re.sub(r"\s+", " ", p.get_text(" ", strip=True)) for p in body.find_all("p")]
+                      excerpt = " ".join(p for p in paragraphs if len(p) > 45)[:1800]
+                      sources.append({
+                          "title": item["title"], "url": final_url, "published": item["published"],
+                          "search_snippet": item["description"][:700],
+                          "page_description": page_description[:900], "article_extract": excerpt
+                      })
+                      seen.add(final_url)
+                  except Exception as exc:
+                      print("News source fetch skipped:", item["title"][:120], str(exc)[:180])
+              print("External news sources gathered:", len(sources), "for", target_name)
+              return sources
+
+          def gemini_article(target_name, recent_titles, used_story_titles, source_briefs):
               prompt = f"""
           Today is {TODAY}. You are the research editor for MadWorld.site, an English-language publication about strange events, mysteries, world news, unexplained phenomena, history, disasters, wars, and crime.
-          Research current, real stories using Google Search. Prefer stories published in the last 72 hours; for evergreen history or mysteries, choose a genuinely new discovery, newly released evidence, or a strong documented angle.
+          Use the supplied current news search results and extracted source text below. Prefer stories published in the last 72 hours; for evergreen history or mysteries, choose a documented new discovery or newly released evidence. If the supplied sources do not support a credible story, return skip rather than inventing details.
+          Supplied search results and extracted source text: {json.dumps(source_briefs, ensure_ascii=False)}
           Preferred category for this article: {target_name}. If there is no genuinely worthwhile new story in that category, choose a better-supported story from another category. You may also choose {EXTRA_TOPICS}. Allowed WordPress category slugs are: paranormal, catastrophes, secrets-of-history, ufo-aliens, wars-conflicts, apocalypse-doomsday. Return the chosen slug and its matching category name.
-          Do not invent facts, dates, quotes, sources, links, witnesses, or video URLs. Use the actual URLs found during Google Search, not guessed URLs. Distinguish verified facts from claims, speculation, and eyewitness accounts. For UFO/paranormal stories, do not present unverified claims as established fact. Avoid graphic detail and unsupported sensational claims.
+          Do not invent facts, dates, quotes, sources, links, witnesses, or video URLs. Use only the supplied source URLs, not guessed URLs. Base factual claims on the extracted source material and distinguish verified facts from claims, speculation, and eyewitness accounts. For UFO/paranormal stories, do not present unverified claims as established fact. Avoid graphic detail and unsupported sensational claims.
           The article must be original reporting-style synthesis, not a sentence-by-sentence rewrite. Use a curious, engaging, mysterious tone without misleading clickbait. Natural, varied paragraph lengths; avoid generic AI filler, repetitive transitions, and templated openings. Use about 250–450 words. Prefer sentences under 20 words.
           Never repeat or substantially repackage these existing post titles: {json.dumps(recent_titles[-100:], ensure_ascii=False)}.
           Do not choose these already-selected stories in this run: {json.dumps(used_story_titles, ensure_ascii=False)}.
@@ -102,7 +159,6 @@ jobs:
               payload = {
                   "model": "gemini-3.8-flash",
                   "input": prompt,
-                  "tools": [{"type": "google_search"}],
                   "generation_config": {"temperature": 0.6, "max_output_tokens": 7000},
                   "store": False
               }
@@ -135,16 +191,14 @@ jobs:
                   if not match:
                       raise RuntimeError("Gemini response was not valid JSON: " + cleaned[:500])
                   article = json.loads(match.group(0))
+              allowed_urls = {item["url"] for item in source_briefs if item.get("url", "").startswith("https://")}
               model_urls = article.get("source_urls") or []
               combined = []
-              for url in model_urls + grounded_urls:
-                  if isinstance(url, str) and url.startswith("https://") and url not in combined:
+              for url in model_urls:
+                  if isinstance(url, str) and url in allowed_urls and url not in combined:
                       combined.append(url)
-              # Prefer source URLs cited in Gemini's actual Google Search grounding annotations.
-              if grounded_urls:
-                  article["source_urls"] = [url for url in combined if url in grounded_urls][:5]
-              else:
-                  article["source_urls"] = combined[:5]
+              # Never allow the model to invent source links; use only URLs fetched above.
+              article["source_urls"] = combined[:5]
               return article
 
           def image_search_and_upload(title):
@@ -282,7 +336,11 @@ jobs:
           for index, (target_slug, target_name) in enumerate(CATEGORIES, start=1):
               print(f"\n[{index}/{target_count}] Researching target category: {target_name}")
               try:
-                  article = gemini_article(target_name, recent_titles, used_story_titles)
+                  source_briefs = search_news(target_name)
+                  if len(source_briefs) < 2:
+                      print("Skipping category because fewer than two source pages could be retrieved:", target_name)
+                      continue
+                  article = gemini_article(target_name, recent_titles, used_story_titles, source_briefs)
                   if article.get("skip"):
                       print("No suitable story found; skipping slot:", article.get("reason", "no reason supplied"))
                       continue
