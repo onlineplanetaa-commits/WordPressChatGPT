@@ -148,7 +148,16 @@ jobs:
                       })
                       seen.add(final_url)
                   except Exception as exc:
-                      print("News source fetch skipped:", item["title"][:120], str(exc)[:180])
+                      print("News page fetch failed; retaining RSS result with its snippet:", item["title"][:120], str(exc)[:180])
+                      # Some publishers block automated requests. Keep the original search result and
+                      # its snippet as a lead; the model must not invent facts beyond this evidence.
+                      if item["url"] not in seen and item["description"]:
+                          sources.append({
+                              "title": item["title"], "url": item["url"], "published": item["published"],
+                              "search_snippet": item["description"][:700],
+                              "page_description": "", "article_extract": ""
+                          })
+                          seen.add(item["url"])
               print("External news sources gathered:", len(sources), "for", target_name)
               return sources
 
@@ -278,7 +287,8 @@ jobs:
                   except Exception as e:
                       print("Image search failed for query:", term, str(e))
               if not chosen:
-                  raise RuntimeError("No suitable freely licensed Wikimedia Commons image found; skipping this article rather than publishing without its required image.")
+                  print("No suitable freely licensed Wikimedia Commons image found; creating the draft without a featured image.")
+                  return None, None
               req = urllib.request.Request(chosen["url"], headers={"User-Agent": "MadWorldDailyDrafts/1.0"})
               with urllib.request.urlopen(req, timeout=60) as response:
                   raw = response.read()
@@ -406,7 +416,11 @@ jobs:
                       print("Skipping article without at least two direct HTTPS sources:", title)
                       continue
                   # Ensure the source block includes only URLs returned by the research step and retain citations in the article.
-                  image_id, image_info = image_search_and_upload(title)
+                  try:
+                      image_id, image_info = image_search_and_upload(title)
+                  except Exception as image_error:
+                      print("Featured image upload failed; continuing with the draft:", str(image_error)[:250])
+                      image_id, image_info = None, None
                   related = find_related_link(title, published_posts)
                   if related:
                       rel_title = strip_html((related.get("title") or {}).get("rendered", "Related article"))
@@ -429,9 +443,11 @@ jobs:
                       "content": content,
                       "excerpt": article.get("excerpt", ""),
                       "status": "draft",
-                      "categories": [wp_categories[chosen_slug]],
-                      "featured_media": image_id
-                  }, method="POST")
+                      "categories": [wp_categories[chosen_slug]]
+                  }
+                  if image_id:
+                      post_data["featured_media"] = image_id
+                  post = wp_json("/wp-json/wp/v2/posts", data=post_data, method="POST")
                   created += 1
                   recent_titles.append(title)
                   used_story_titles.append(story_identity)
