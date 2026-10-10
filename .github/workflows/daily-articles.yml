@@ -147,7 +147,7 @@ jobs:
                                   if isinstance(node, dict):
                                       candidate = node.get("articleBody")
                                       if isinstance(candidate, str) and len(candidate) > len(structured_excerpt):
-                                          structured_excerpt = re.sub(r"\\s+", " ", candidate).strip()
+                                          structured_excerpt = re.sub(r"\s+", " ", candidate).strip()
                                       graph = node.get("@graph")
                                       if isinstance(graph, list):
                                           stack.extend(graph)
@@ -158,7 +158,7 @@ jobs:
                       body = soup.find("article") or soup.find("main") or soup.body or soup
                       for tag in body(["script", "style", "nav", "footer", "header", "noscript"]):
                           tag.decompose()
-                      paragraphs = [re.sub(r"\\s+", " ", p.get_text(" ", strip=True)) for p in body.find_all("p")]
+                      paragraphs = [re.sub(r"\s+", " ", p.get_text(" ", strip=True)) for p in body.find_all("p")]
                       excerpt = " ".join(p for p in paragraphs if len(p) > 45)[:2200]
                       if len(structured_excerpt) > len(excerpt):
                           excerpt = structured_excerpt[:2200]
