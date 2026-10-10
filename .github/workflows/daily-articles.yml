@@ -1,6 +1,9 @@
 name: Daily MadWorld article drafts
 
 on:
+  push:
+    branches:
+      - main
   schedule:
     # Daily at 08:00 UTC (11:00 in Ukraine during summer time).
     - cron: "0 8 * * *"
