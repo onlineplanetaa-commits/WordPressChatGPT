@@ -100,45 +100,47 @@ jobs:
           If no sufficiently credible, interesting story can be found after searching, return {{"skip": true, "reason": "..."}} instead of inventing one.
           """
               payload = {
-                  "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                  "tools": [{"google_search_retrieval": {}}],
-                  "generationConfig": {"temperature": 0.6, "maxOutputTokens": 7000}
+                  "model": "gemini-3.8-flash",
+                  "input": prompt,
+                  "tools": [{"type": "google_search"}],
+                  "generation_config": {"temperature": 0.6, "max_output_tokens": 7000},
+                  "store": False
               }
               result = request_json(
-                  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + urllib.parse.quote(GEMINI_API_KEY),
+                  "https://generativelanguage.googleapis.com/v1beta/interactions",
                   data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                  headers={"Content-Type": "application/json"},
+                  headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
                   method="POST", timeout=240
               )
-              candidates = result.get("candidates") or []
-              if not candidates:
-                  raise RuntimeError("Gemini returned no candidates: " + json.dumps(result.get("promptFeedback", {}), ensure_ascii=False)[:800])
-              parts = (candidates[0].get("content") or {}).get("parts") or []
-              text_out = "\n".join(part.get("text", "") for part in parts if part.get("text"))
+              output_parts = []
+              grounded_urls = []
+              for step in result.get("steps") or []:
+                  if step.get("type") != "model_output":
+                      continue
+                  for part in step.get("content") or []:
+                      if part.get("type") == "text" and part.get("text"):
+                          output_parts.append(part["text"])
+                          for annotation in part.get("annotations") or []:
+                              url = annotation.get("url") or annotation.get("uri") or ""
+                              if annotation.get("type") == "url_citation" and url.startswith("https://") and url not in grounded_urls:
+                                  grounded_urls.append(url)
+              text_out = "\\n".join(output_parts).strip()
               if not text_out:
-                  raise RuntimeError("Gemini response did not contain text.")
-              cleaned = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", text_out, flags=re.I)
+                  raise RuntimeError("Gemini Interactions API returned no text: " + json.dumps({"status": result.get("status"), "error": result.get("error")}, ensure_ascii=False)[:1000])
+              cleaned = re.sub(r"^\\s*```(?:json)?\\s*|\\s*```\\s*$", "", text_out, flags=re.I)
               try:
                   article = json.loads(cleaned)
               except json.JSONDecodeError:
-                  match = re.search(r"\{.*\}", cleaned, re.S)
+                  match = re.search(r"\\{.*\\}", cleaned, re.S)
                   if not match:
                       raise RuntimeError("Gemini response was not valid JSON: " + cleaned[:500])
                   article = json.loads(match.group(0))
-              # Prefer URLs supplied by Gemini's actual Google Search grounding metadata.
-              grounded_urls = []
-              metadata = candidates[0].get("groundingMetadata") or {}
-              for chunk in metadata.get("groundingChunks") or []:
-                  web_info = chunk.get("web") or {}
-                  url = web_info.get("uri", "")
-                  if url.startswith("https://") and url not in grounded_urls:
-                      grounded_urls.append(url)
               model_urls = article.get("source_urls") or []
               combined = []
               for url in model_urls + grounded_urls:
                   if isinstance(url, str) and url.startswith("https://") and url not in combined:
                       combined.append(url)
-              # Only cite source URLs verified in the grounding results when available.
+              # Prefer source URLs cited in Gemini's actual Google Search grounding annotations.
               if grounded_urls:
                   article["source_urls"] = [url for url in combined if url in grounded_urls][:5]
               else:
