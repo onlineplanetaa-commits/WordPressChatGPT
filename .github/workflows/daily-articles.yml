@@ -105,7 +105,7 @@ jobs:
                   "generationConfig": {"temperature": 0.6, "maxOutputTokens": 7000}
               }
               result = request_json(
-                  "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + urllib.parse.quote(GEMINI_API_KEY),
+                  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + urllib.parse.quote(GEMINI_API_KEY),
                   data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                   headers={"Content-Type": "application/json"},
                   method="POST", timeout=240
