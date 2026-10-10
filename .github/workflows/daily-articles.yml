@@ -98,7 +98,7 @@ jobs:
           "story_identity": short normalized description of the actual event/story,
           "source_urls": array of 2–5 direct source URLs used for factual claims.
           HTML rules: exactly one <h1> article headline at the start; exactly one <h2> heading around the middle; use paragraphs and <strong> sparingly for natural keyword emphasis; no bullet lists. End with a <h3>Source of information</h3> and a short list of linked sources from source_urls. Sources must be real and directly relevant. No Markdown fences. No image HTML. Do not include invented YouTube/X/Facebook embeds.
-          If no sufficiently credible, interesting story can be found after searching, return {"skip": true, "reason": "..."} instead of inventing one.
+          If no sufficiently credible, interesting story can be found after searching, return {{"skip": true, "reason": "..."}} instead of inventing one.
           """
               payload = {
                   "model": "gpt-6-astra",
