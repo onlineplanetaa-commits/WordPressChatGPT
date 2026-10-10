@@ -438,7 +438,7 @@ jobs:
                   else:
                       print("No sufficiently relevant YouTube video found.")
                   # Add category and a short excerpt. Always create a draft, never publish.
-                  post = wp_json("/wp-json/wp/v2/posts", data={
+                  post_data = {
                       "title": title,
                       "content": content,
                       "excerpt": article.get("excerpt", ""),
